@@ -10,10 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.core.config import settings
 from app.core.database import Base
-from app.modules.clinic.model import Model as ClinicModel
-from app.modules.users.model import Model as UserModel
-from app.modules.queue.model import Model as QueueModel
-from app.modules.prescriptions.model import Model as PrescriptionModel
+from app.modules.clinic.model import Clinic as ClinicModel
+from app.modules.users.model import User as UserModel
+from app.modules.queue.model import Queue as QueueModel
+from app.modules.prescriptions.model import Prescription as PrescriptionModel
 
 config = context.config
 
