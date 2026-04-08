@@ -7,12 +7,13 @@ export const client = axios.create({
   },
 });
 
-// Add a request interceptor
+// Add a request interceptor to attach JWT token to every request
 client.interceptors.request.use(
   (config) => {
-    // You can attach tokens here, e.g.
-    // const token = localStorage.getItem('token');
-    // if (token) config.headers.Authorization = `Bearer ${token}`;
+    const token = localStorage.getItem('token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
     return config;
   },
   (error) => {
@@ -20,11 +21,16 @@ client.interceptors.request.use(
   }
 );
 
-// Add a response interceptor
 client.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    // Handle global errors, e.g. 401 unauthenticated
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      // Clear token and kick to login if unauthorized
+      localStorage.removeItem('token');
+      if (window.location.pathname !== '/') {
+        window.location.href = '/';
+      }
+    }
     return Promise.reject(error);
   }
 );

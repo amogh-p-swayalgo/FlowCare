@@ -1,26 +1,32 @@
 from pydantic import BaseModel
-from datetime import datetime
 from typing import Optional
-from .model import QueueStatus
+from datetime import datetime
 
-class QueueBase(BaseModel):
-    clinic_id: int
+class QueueJoinInput(BaseModel):
+    clinic_id: str
+    name: str
+    phone: Optional[str] = None
+    age: Optional[int] = None
+    gender: Optional[str] = None # M, F, O
 
-class QueueJoinRequest(QueueBase):
-    pass
-
-class QueueResponse(QueueBase):
+class QueueResponse(BaseModel):
     id: int
-    user_id: int
+    name: str
+    phone: Optional[str] = None
     token_number: int
-    status: QueueStatus
+    status: str
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    is_new_patient: bool = False
     joined_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 class QueueStatusResponse(BaseModel):
-    my_token: int
-    current_active_token: int
-    people_in_front: int
-    status: QueueStatus
+    name: str
+    phone: Optional[str] = None
+    token_number: int
+    status: str
+    position: int
+    clinic_id: str

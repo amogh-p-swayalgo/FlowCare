@@ -1,110 +1,151 @@
-from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, date
+from datetime import datetime
 from .model import Queue, QueueStatus
 
 class QueueService:
     @staticmethod
-    def join_queue(db: Session, user_id: int, clinic_id: int) -> Queue:
-        # 1. Check if already in queue for this clinic today
-        today = date.today()
+    def join_queue(db: Session, clinic_id: str, name: str, phone: str, age: int = None, gender: str = None) -> Queue:
+        # Check if already in queue
+        today = datetime.utcnow().date()
         existing = db.query(Queue).filter(
-            Queue.user_id == user_id,
             Queue.clinic_id == clinic_id,
-            func.date(Queue.joined_at) == today,
-            Queue.status == QueueStatus.WAITING
+            Queue.phone == phone,
+            Queue.status == QueueStatus.WAITING.value,
+            func.date(Queue.joined_at) == today
         ).first()
         
         if existing:
             return existing
 
-        # 2. Get the last token number for today for this clinic
-        last_token = db.query(func.max(Queue.token_number)).filter(
+        # Get next token number
+        last_entry = db.query(Queue).filter(
             Queue.clinic_id == clinic_id,
             func.date(Queue.joined_at) == today
-        ).scalar() or 0
+        ).order_by(Queue.token_number.desc()).first()
         
-        new_token = last_token + 1
-
-        # 3. Create new queue entry
-        queue_item = Queue(
-            user_id=user_id,
+        next_token = (last_entry.token_number + 1) if last_entry else 1
+        
+        new_entry = Queue(
             clinic_id=clinic_id,
-            token_number=new_token,
-            status=QueueStatus.WAITING
+            name=name,
+            phone=phone,
+            age=age,
+            gender=gender,
+            token_number=next_token
         )
-        
-        db.add(queue_item)
+        db.add(new_entry)
         db.commit()
-        db.refresh(queue_item)
-        return queue_item
+        db.refresh(new_entry)
+        return new_entry
 
     @staticmethod
-    def get_user_status(db: Session, user_id: int, clinic_id: int) -> dict:
-        today = date.today()
-        
-        # Get user's current record
-        my_record = db.query(Queue).filter(
-            Queue.user_id == user_id,
-            Queue.clinic_id == clinic_id,
-            func.date(Queue.joined_at) == today
-        ).order_by(Queue.joined_at.desc()).first()
-        
-        if not my_record:
+    def is_new_patient(db: Session, clinic_id: str, phone: str) -> bool:
+        from app.modules.prescriptions.model import Prescription
+        if not phone: return True
+        count = db.query(Prescription).filter(
+            Prescription.clinic_id == clinic_id,
+            Prescription.user_id == phone
+        ).count()
+        return count == 0
+
+    @staticmethod
+    def add_walkin(db: Session, clinic_id: str, name: str, phone: str, age: int = None, gender: str = None) -> Queue:
+        return QueueService.join_queue(db, clinic_id, name, phone, age, gender)
+
+    @staticmethod
+    def get_user_status(db: Session, entry_id: int) -> dict:
+        entry = db.query(Queue).filter(Queue.id == entry_id).first()
+        if not entry:
             return None
-
-        # Get current active token (the one being called now)
-        current_active = db.query(func.max(Queue.token_number)).filter(
-            Queue.clinic_id == clinic_id,
-            func.date(Queue.joined_at) == today,
-            Queue.status == QueueStatus.CALLED
-        ).scalar() or 0
-
-        # Calculate people in front
-        # People waiting with a token number smaller than mine
+        
+        # Calculate position (how many waiting patients are before this one today)
+        today = datetime.utcnow().date()
         people_in_front = db.query(Queue).filter(
-            Queue.clinic_id == clinic_id,
-            func.date(Queue.joined_at) == today,
-            Queue.status == QueueStatus.WAITING,
-            Queue.token_number < my_record.token_number
+            Queue.clinic_id == entry.clinic_id,
+            Queue.status == QueueStatus.WAITING.value,
+            Queue.token_number < entry.token_number,
+            func.date(Queue.joined_at) == today
         ).count()
 
+        return {
+            "name": entry.name,
+            "phone": entry.phone,
+            "token_number": entry.token_number,
+            "status": entry.status,
+            "position": people_in_front + 1 if entry.status == QueueStatus.WAITING.value else 0,
+            "clinic_id": entry.clinic_id
+        }
+
     @staticmethod
-    def get_clinic_queue(db: Session, clinic_id: int) -> list[Queue]:
-        today = date.today()
-        # Return all patients waiting or in-progress for today
+    def get_clinic_waitlist(db: Session, clinic_id: str):
+        today = datetime.utcnow().date()
         return db.query(Queue).filter(
             Queue.clinic_id == clinic_id,
-            func.date(Queue.joined_at) == today
+            func.date(Queue.joined_at) == today,
+            Queue.status == QueueStatus.WAITING.value
         ).order_by(Queue.token_number.asc()).all()
 
     @staticmethod
-    def call_next_patient(db: Session, clinic_id: int) -> Optional[Queue]:
-        today = date.today()
-        
-        # 1. Complete the current active patient
-        current_active = db.query(Queue).filter(
+    def get_active_patient(db: Session, clinic_id: str) -> Queue:
+        today = datetime.utcnow().date()
+        return db.query(Queue).filter(
             Queue.clinic_id == clinic_id,
-            Queue.status == QueueStatus.CALLED,
+            Queue.status == QueueStatus.CALLED.value,
             func.date(Queue.joined_at) == today
-        ).first()
+        ).order_by(Queue.called_at.desc()).first()
+
+    @staticmethod
+    def call_next(db: Session, clinic_id: str) -> Queue:
+        today = datetime.utcnow().date()
         
-        if current_active:
-            current_active.status = QueueStatus.COMPLETED
-        
-        # 2. Find the next one in line
-        next_in_line = db.query(Queue).filter(
+        # 1. Automatically mark any currently 'CALLED' patients as 'SKIPPED'
+        # to clear the dashboard for the new patient.
+        db.query(Queue).filter(
             Queue.clinic_id == clinic_id,
-            Queue.status == QueueStatus.WAITING,
+            Queue.status == QueueStatus.CALLED.value,
+            func.date(Queue.joined_at) == today
+        ).update({"status": QueueStatus.SKIPPED.value})
+        
+        # 2. Find the next 'WAITING' patient
+        next_patient = db.query(Queue).filter(
+            Queue.clinic_id == clinic_id,
+            Queue.status == QueueStatus.WAITING.value,
             func.date(Queue.joined_at) == today
         ).order_by(Queue.token_number.asc()).first()
         
-        if next_in_line:
-            next_in_line.status = QueueStatus.CALLED
-            next_in_line.called_at = datetime.utcnow()
+        if next_patient:
+            next_patient.status = QueueStatus.CALLED.value
+            next_patient.called_at = datetime.utcnow()
+            db.commit()
+            db.refresh(next_patient)
+            return next_patient
         
-        db.commit()
-        if next_in_line:
-            db.refresh(next_in_line)
-        return next_in_line
+        db.commit() # Commit the 'SKIPPED' updates even if no next patient
+        return None
+
+    @staticmethod
+    def leave_queue(db: Session, entry_id: int):
+        patient = db.query(Queue).filter(Queue.id == entry_id).first()
+        if patient:
+            patient.status = QueueStatus.SKIPPED.value
+            db.commit()
+        return patient
+
+    @staticmethod
+    def complete_patient(db: Session, entry_id: int):
+        patient = db.query(Queue).filter(Queue.id == entry_id).first()
+        if patient:
+            patient.status = QueueStatus.COMPLETED.value
+            db.commit()
+        return patient
+
+    @staticmethod
+    def get_active_by_phone(db: Session, clinic_id: str, phone: str) -> Queue:
+        today = datetime.utcnow().date()
+        return db.query(Queue).filter(
+            Queue.clinic_id == clinic_id,
+            Queue.phone == phone,
+            Queue.status.in_([QueueStatus.WAITING.value, QueueStatus.CALLED.value]),
+            func.date(Queue.joined_at) == today
+        ).order_by(Queue.joined_at.desc()).first()
